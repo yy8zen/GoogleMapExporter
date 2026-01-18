@@ -44,7 +44,7 @@ app.get('/', (req, res) => {
 app.post('/api/scrape', async (req, res) => {
     const {
         address, prefecture, city, keyword, rating, reviewCount, headless,
-        addressFilter, categoryFilter, budgetMin, budgetMax, dayFilter, hoursFilter
+        addressFilter, categoryFilter, budgetMin, budgetMax, dayFilter, hoursFilter, maxItems
     } = req.body;
 
     // 入力検証（キーワードは必須、住所は任意）
@@ -59,7 +59,8 @@ app.post('/api/scrape', async (req, res) => {
         budgetMin: budgetMin || null,
         budgetMax: budgetMax || null,
         days: dayFilter || [],  // 配列（選択された曜日）
-        hours: hoursFilter || ''  // hh:mm形式
+        hours: hoursFilter || '',  // hh:mm形式
+        maxItems: parseInt(maxItems) || 0  // 0は無制限
     };
 
     const sessionId = Date.now().toString();

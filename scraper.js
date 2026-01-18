@@ -182,12 +182,19 @@ class GoogleMapScraper {
             }
 
             // 3. スクロールして追加の結果を読み込み
-            this.reportProgress('scrolling', { message: 'リストをスクロールして候補を取得中...' });
-            await this.autoScroll(feed);
+            const maxItems = filters.maxItems || 0;
+            const scrollMessage = maxItems > 0
+                ? `リストをスクロールして候補を取得中（最大${maxItems}件）...`
+                : 'リストをスクロールして候補を取得中...';
+            this.reportProgress('scrolling', { message: scrollMessage });
+            await this.autoScroll(feed, maxItems);
 
             // 4. 基本リストの抽出
-            this.reportProgress('extracting', { message: '候補店リストを抽出中...' });
-            const candidates = await this.extractBasicList(feed);
+            const extractMessage = maxItems > 0
+                ? `候補店リストを抽出中（最大${maxItems}件）...`
+                : '候補店リストを抽出中...';
+            this.reportProgress('extracting', { message: extractMessage });
+            const candidates = await this.extractBasicList(feed, maxItems);
             console.log(`${candidates.length}件の候補を抽出しました`);
             this.reportProgress('extracted', { message: `候補店リストアップ完了: ${candidates.length}件`, total: candidates.length });
 
@@ -615,8 +622,9 @@ class GoogleMapScraper {
         return { passed: true, reason: '' };
     }
 
-    async autoScroll(feedLocator) {
-        console.log('リストをスクロール中（最後まで）...');
+    async autoScroll(feedLocator, maxItems = 0) {
+        const targetText = maxItems > 0 ? `最大${maxItems}件` : '最後まで';
+        console.log(`リストをスクロール中（${targetText}）...`);
         const maxScrollAttempts = 100;  // 十分大きな上限
         let scrollAttempt = 0;
         let previousHeight = 0;
@@ -626,11 +634,22 @@ class GoogleMapScraper {
             for (let i = 0; i < maxScrollAttempts; i++) {
                 scrollAttempt = i + 1;
 
-                // 現在のスクロール位置を取得
-                const currentHeight = await feedLocator.evaluate(el => el.scrollHeight);
-
-                if (scrollAttempt % 5 === 1 || scrollAttempt <= 3) {
-                    console.log(`スクロール ${scrollAttempt}回目... (高さ: ${currentHeight})`);
+                // 現在のアイテム数をチェック（maxItemsが設定されている場合）
+                if (maxItems > 0) {
+                    const currentItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+                    if (currentItemCount >= maxItems) {
+                        console.log(`目標件数（${maxItems}件）に到達しました（現在: ${currentItemCount}件）`);
+                        break;
+                    }
+                    if (scrollAttempt % 5 === 1 || scrollAttempt <= 3) {
+                        console.log(`スクロール ${scrollAttempt}回目... (現在: ${currentItemCount}件 / 目標: ${maxItems}件)`);
+                    }
+                } else {
+                    // 現在のスクロール位置を取得
+                    const currentHeight = await feedLocator.evaluate(el => el.scrollHeight);
+                    if (scrollAttempt % 5 === 1 || scrollAttempt <= 3) {
+                        console.log(`スクロール ${scrollAttempt}回目... (高さ: ${currentHeight})`);
+                    }
                 }
 
                 try {
@@ -673,17 +692,20 @@ class GoogleMapScraper {
         }
     }
 
-    async extractBasicList(feedLocator) {
-        console.log('リストから基本情報を抽出中...');
+    async extractBasicList(feedLocator, maxItems = 0) {
+        const limitText = maxItems > 0 ? `（最大${maxItems}件）` : '';
+        console.log(`リストから基本情報を抽出中${limitText}...`);
         const results = [];
         let errorCount = 0;
 
         try {
             // リンクの親要素を取得する
             const linkElements = await feedLocator.locator('a[href*="/maps/place/"]').all();
-            console.log(`${linkElements.length}個のリンクを検出しました`);
+            const totalLinks = linkElements.length;
+            const processLimit = maxItems > 0 ? Math.min(maxItems, totalLinks) : totalLinks;
+            console.log(`${totalLinks}個のリンクを検出しました（${processLimit}件まで処理）`);
 
-            for (let i = 0; i < linkElements.length; i++) {
+            for (let i = 0; i < processLimit; i++) {
                 try {
                     const linkEl = linkElements[i];
                     const url = await linkEl.getAttribute('href');

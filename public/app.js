@@ -47,7 +47,8 @@ form.addEventListener('submit', async (e) => {
         budgetMin: parseInt(document.getElementById('budgetMin').value) || null,
         budgetMax: parseInt(document.getElementById('budgetMax').value) || null,
         dayFilter: selectedDays,
-        hoursFilter: document.getElementById('hoursFilter').value
+        hoursFilter: document.getElementById('hoursFilter').value,
+        maxItems: parseInt(document.getElementById('maxItems').value) || 0  // 0は無制限
     };
 
     // UIの初期化
@@ -112,7 +113,8 @@ socket.on('progress', (data) => {
             'saving': 'CSVファイルを保存中...',
             'completed': '処理完了'
         };
-        label = stageLabels[stage] || data.message || '処理中...';
+        // メッセージがあればそれを使う（取得件数情報などを含む）
+        label = data.message || stageLabels[stage] || '処理中...';
     }
     progressStage.textContent = label;
 
@@ -261,6 +263,7 @@ newSearchButton.addEventListener('click', () => {
     // 曜日チェックボックスをリセット
     document.querySelectorAll('input[name="dayFilter"]').forEach(cb => cb.checked = false);
     document.getElementById('hoursFilter').value = '';
+    document.getElementById('maxItems').value = '';
 
     // UIをリセット
     progressSection.style.display = 'none';
