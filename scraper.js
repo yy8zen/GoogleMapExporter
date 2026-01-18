@@ -654,15 +654,26 @@ class GoogleMapScraper {
 
                 try {
                     await feedLocator.evaluate(el => el.scrollBy(0, 5000));
-                    await this.page.waitForTimeout(1500);
+                    await this.page.waitForTimeout(3000);  // 3秒待機
 
-                    // 「すべて表示しました」テキストをチェック
+                    // リスト終端のテキストをチェック
                     try {
-                        const endText = await this.page.getByText('すべて表示しました').isVisible({ timeout: 500 });
-                        if (endText) {
-                            console.log('リストの最後に到達しました');
-                            break;
+                        // 複数のパターンをチェック
+                        const endPatterns = ['リストの最後に到達しました', 'すべて表示しました'];
+                        let foundEnd = false;
+                        for (const pattern of endPatterns) {
+                            try {
+                                const endText = await this.page.getByText(pattern).isVisible({ timeout: 300 });
+                                if (endText) {
+                                    console.log(`リストの最後に到達しました（"${pattern}"を検出）`);
+                                    foundEnd = true;
+                                    break;
+                                }
+                            } catch (e) {
+                                // このパターンは見つからない
+                            }
                         }
+                        if (foundEnd) break;
                     } catch (e) {
                         // テキストが見つからない場合は続行
                     }
