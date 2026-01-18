@@ -627,76 +627,84 @@ class GoogleMapScraper {
         console.log(`リストをスクロール中（${targetText}）...`);
         const maxScrollAttempts = 100;  // 十分大きな上限
         let scrollAttempt = 0;
-        let previousHeight = 0;
+        let previousItemCount = 0;
         let noChangeCount = 0;
 
         try {
+            // 初期アイテム数を取得
+            previousItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+            console.log(`初期アイテム数: ${previousItemCount}件`);
+
             for (let i = 0; i < maxScrollAttempts; i++) {
                 scrollAttempt = i + 1;
 
-                // 現在のアイテム数をチェック（maxItemsが設定されている場合）
-                if (maxItems > 0) {
-                    const currentItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
-                    if (currentItemCount >= maxItems) {
-                        console.log(`目標件数（${maxItems}件）に到達しました（現在: ${currentItemCount}件）`);
-                        break;
-                    }
-                    if (scrollAttempt % 5 === 1 || scrollAttempt <= 3) {
-                        console.log(`スクロール ${scrollAttempt}回目... (現在: ${currentItemCount}件 / 目標: ${maxItems}件)`);
-                    }
-                } else {
-                    // 現在のスクロール位置を取得
-                    const currentHeight = await feedLocator.evaluate(el => el.scrollHeight);
-                    if (scrollAttempt % 5 === 1 || scrollAttempt <= 3) {
-                        console.log(`スクロール ${scrollAttempt}回目... (高さ: ${currentHeight})`);
-                    }
+                // 現在のアイテム数をチェック
+                const currentItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+
+                // maxItemsが設定されている場合、目標に達したか確認
+                if (maxItems > 0 && currentItemCount >= maxItems) {
+                    console.log(`目標件数（${maxItems}件）に到達しました（現在: ${currentItemCount}件）`);
+                    break;
                 }
 
+                console.log(`スクロール ${scrollAttempt}回目... (現在: ${currentItemCount}件${maxItems > 0 ? ` / 目標: ${maxItems}件` : ''})`);
+
                 try {
-                    await feedLocator.evaluate(el => el.scrollBy(0, 5000));
-                    await this.page.waitForTimeout(3000);  // 3秒待機
+                    // スクロール実行
+                    await feedLocator.evaluate(el => el.scrollBy(0, 3000));
+
+                    // コンテンツ読み込みを待機（5秒）
+                    await this.page.waitForTimeout(5000);
 
                     // リスト終端のテキストをチェック
-                    try {
-                        // 複数のパターンをチェック
-                        const endPatterns = ['リストの最後に到達しました', 'すべて表示しました'];
-                        let foundEnd = false;
-                        for (const pattern of endPatterns) {
-                            try {
-                                const endText = await this.page.getByText(pattern).isVisible({ timeout: 300 });
-                                if (endText) {
-                                    console.log(`リストの最後に到達しました（"${pattern}"を検出）`);
-                                    foundEnd = true;
-                                    break;
-                                }
-                            } catch (e) {
-                                // このパターンは見つからない
+                    const endPatterns = ['リストの最後に到達しました', 'すべて表示しました'];
+                    let foundEnd = false;
+                    for (const pattern of endPatterns) {
+                        try {
+                            const endText = await this.page.getByText(pattern).isVisible({ timeout: 500 });
+                            if (endText) {
+                                console.log(`リストの最後に到達しました（"${pattern}"を検出）`);
+                                foundEnd = true;
+                                break;
                             }
+                        } catch (e) {
+                            // このパターンは見つからない
                         }
-                        if (foundEnd) break;
-                    } catch (e) {
-                        // テキストが見つからない場合は続行
                     }
+                    if (foundEnd) break;
 
-                    // スクロール後の高さをチェック
-                    const newHeight = await feedLocator.evaluate(el => el.scrollHeight);
-                    if (newHeight === previousHeight) {
-                        noChangeCount++;
-                        if (noChangeCount >= 3) {
-                            console.log('これ以上読み込めるコンテンツがありません');
-                            break;
+                    // 新しいアイテムが読み込まれたかチェック
+                    const newItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+
+                    if (newItemCount === previousItemCount) {
+                        // アイテムが増えていない場合、追加で待機してから再チェック
+                        console.log(`アイテム数変化なし（${newItemCount}件）、追加待機中...`);
+                        await this.page.waitForTimeout(3000);
+
+                        const afterWaitCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+                        if (afterWaitCount === previousItemCount) {
+                            noChangeCount++;
+                            if (noChangeCount >= 2) {
+                                console.log('これ以上読み込めるコンテンツがありません');
+                                break;
+                            }
+                        } else {
+                            noChangeCount = 0;
+                            previousItemCount = afterWaitCount;
                         }
                     } else {
                         noChangeCount = 0;
+                        previousItemCount = newItemCount;
                     }
-                    previousHeight = newHeight;
 
                 } catch (error) {
                     console.warn(`スクロール ${scrollAttempt} でエラーが発生: ${error.message}`);
                     // スクロールエラーは致命的ではないので続行
                 }
             }
-            console.log(`スクロール完了 (${scrollAttempt}回実行)`);
+
+            const finalCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+            console.log(`スクロール完了 (${scrollAttempt}回実行、${finalCount}件取得)`);
         } catch (error) {
             console.error('スクロール中にエラーが発生しました:', error.message);
             // スクロールに失敗しても、取得できた分だけ処理を続行
