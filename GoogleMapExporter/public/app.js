@@ -1,6 +1,22 @@
 // Socket.IO接続
 const socket = io();
 
+// 隠しデバッグモード（Ctrl+Shift+D で表示切替）
+document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyD') {
+        e.preventDefault();
+        const debugOption = document.getElementById('debugOption');
+        if (debugOption.style.display === 'none') {
+            debugOption.style.display = 'block';
+            console.log('Debug mode enabled');
+        } else {
+            debugOption.style.display = 'none';
+            document.getElementById('debugMode').checked = false;
+            console.log('Debug mode disabled');
+        }
+    }
+});
+
 // DOM要素
 const form = document.getElementById('scrapeForm');
 
@@ -35,19 +51,25 @@ form.addEventListener('submit', async (e) => {
 
     // フォームデータの取得（キーワードに場所も含める）
     const keyword = document.getElementById('keyword').value.trim();
+    // デバッグモードのチェック（チェックされていたらブラウザ表示）
+    const isDebugMode = document.getElementById('debugMode').checked;
+
     const formData = {
         address: '',  // キーワードに含まれる
         keyword: keyword,
-        rating: parseFloat(document.getElementById('rating').value) || 0,
-        reviewCount: parseInt(document.getElementById('reviewCount').value) || 0,
-        headless: true,  // 常にバックグラウンド実行
+        ratingMin: parseFloat(document.getElementById('ratingMin').value) || 0,
+        ratingMax: parseFloat(document.getElementById('ratingMax').value) || null,
+        reviewCountMin: parseInt(document.getElementById('reviewCountMin').value) || 0,
+        reviewCountMax: parseInt(document.getElementById('reviewCountMax').value) || null,
+        headless: !isDebugMode,  // デバッグモードならブラウザ表示
         // 絞り込み条件
         addressFilter: document.getElementById('addressFilter').value.trim(),
         categoryFilter: document.getElementById('categoryFilter').value.trim(),
         budgetMin: parseInt(document.getElementById('budgetMin').value) || null,
         budgetMax: parseInt(document.getElementById('budgetMax').value) || null,
         dayFilter: selectedDays,
-        hoursFilter: document.getElementById('hoursFilter').value
+        hoursFilter: document.getElementById('hoursFilter').value,
+        maxItems: parseInt(document.getElementById('maxItems').value) || 0  // 0は無制限
     };
 
     // UIの初期化
@@ -112,7 +134,8 @@ socket.on('progress', (data) => {
             'saving': 'CSVファイルを保存中...',
             'completed': '処理完了'
         };
-        label = stageLabels[stage] || data.message || '処理中...';
+        // メッセージがあればそれを使う（取得件数情報などを含む）
+        label = data.message || stageLabels[stage] || '処理中...';
     }
     progressStage.textContent = label;
 
@@ -251,8 +274,10 @@ newSearchButton.addEventListener('click', () => {
     // フォームをリセット
     form.reset();
     document.getElementById('keyword').value = '';
-    document.getElementById('rating').value = '0';
-    document.getElementById('reviewCount').value = '0';
+    document.getElementById('ratingMin').value = '';
+    document.getElementById('ratingMax').value = '';
+    document.getElementById('reviewCountMin').value = '';
+    document.getElementById('reviewCountMax').value = '';
     // 詳細フィルターもリセット
     document.getElementById('addressFilter').value = '';
     document.getElementById('categoryFilter').value = '';
@@ -261,6 +286,8 @@ newSearchButton.addEventListener('click', () => {
     // 曜日チェックボックスをリセット
     document.querySelectorAll('input[name="dayFilter"]').forEach(cb => cb.checked = false);
     document.getElementById('hoursFilter').value = '';
+    document.getElementById('maxItems').value = '';
+    // デバッグモードはリセットしない（開発者は継続して使用するため）
 
     // UIをリセット
     progressSection.style.display = 'none';

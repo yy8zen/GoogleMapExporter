@@ -43,8 +43,8 @@ app.get('/', (req, res) => {
 // スクレイピング実行エンドポイント
 app.post('/api/scrape', async (req, res) => {
     const {
-        address, prefecture, city, keyword, rating, reviewCount, headless,
-        addressFilter, categoryFilter, budgetMin, budgetMax, dayFilter, hoursFilter
+        address, prefecture, city, keyword, ratingMin, ratingMax, reviewCountMin, reviewCountMax, headless,
+        addressFilter, categoryFilter, budgetMin, budgetMax, dayFilter, hoursFilter, maxItems
     } = req.body;
 
     // 入力検証（キーワードは必須、住所は任意）
@@ -59,7 +59,8 @@ app.post('/api/scrape', async (req, res) => {
         budgetMin: budgetMin || null,
         budgetMax: budgetMax || null,
         days: dayFilter || [],  // 配列（選択された曜日）
-        hours: hoursFilter || ''  // hh:mm形式
+        hours: hoursFilter || '',  // hh:mm形式
+        maxItems: parseInt(maxItems) || 0  // 0は無制限
     };
 
     const sessionId = Date.now().toString();
@@ -116,8 +117,10 @@ app.post('/api/scrape', async (req, res) => {
                 const results = await scraper.search(
                     address,
                     keyword,
-                    parseFloat(rating) || 0,
-                    parseInt(reviewCount) || 0,
+                    parseFloat(ratingMin) || 0,
+                    parseFloat(ratingMax) || null,
+                    parseInt(reviewCountMin) || 0,
+                    parseInt(reviewCountMax) || null,
                     filters
                 );
 

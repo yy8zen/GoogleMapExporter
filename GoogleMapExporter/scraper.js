@@ -111,7 +111,7 @@ class GoogleMapScraper {
         }
     }
 
-    async search(address, keyword, minRating = 0, minReviews = 0, filters = {}) {
+    async search(address, keyword, minRating = 0, maxRating = null, minReviews = 0, maxReviews = null, filters = {}) {
         try {
             // Google Mapsへのナビゲーション（リトライ付き）
             this.reportProgress('opening', { message: 'Google Mapsを開いています...' });
@@ -182,12 +182,19 @@ class GoogleMapScraper {
             }
 
             // 3. スクロールして追加の結果を読み込み
-            this.reportProgress('scrolling', { message: 'リストをスクロールして候補を取得中...' });
-            await this.autoScroll(feed);
+            const maxItems = filters.maxItems || 0;
+            const scrollMessage = maxItems > 0
+                ? `リストをスクロールして候補を取得中（最大${maxItems}件）...`
+                : 'リストをスクロールして候補を取得中...';
+            this.reportProgress('scrolling', { message: scrollMessage });
+            await this.autoScroll(feed, maxItems);
 
             // 4. 基本リストの抽出
-            this.reportProgress('extracting', { message: '候補店リストを抽出中...' });
-            const candidates = await this.extractBasicList(feed);
+            const extractMessage = maxItems > 0
+                ? `候補店リストを抽出中（最大${maxItems}件）...`
+                : '候補店リストを抽出中...';
+            this.reportProgress('extracting', { message: extractMessage });
+            const candidates = await this.extractBasicList(feed, maxItems);
             console.log(`${candidates.length}件の候補を抽出しました`);
             this.reportProgress('extracted', { message: `候補店リストアップ完了: ${candidates.length}件`, total: candidates.length });
 
@@ -206,14 +213,26 @@ class GoogleMapScraper {
                 const r = parseFloat(c.rating) || 0;
                 const rev = parseInt(c.reviews) || 0;
 
-                // 評価フィルター
+                // 評価フィルター（下限）
                 if (minRating > 0 && r < minRating) {
                     preFilteredOut.rating++;
                     continue;
                 }
 
-                // レビュー数フィルター（リストで取得できた場合のみ）
+                // 評価フィルター（上限）
+                if (maxRating !== null && r > maxRating) {
+                    preFilteredOut.rating++;
+                    continue;
+                }
+
+                // レビュー数フィルター（下限、リストで取得できた場合のみ）
                 if (minReviews > 0 && rev > 0 && rev < minReviews) {
+                    preFilteredOut.reviews++;
+                    continue;
+                }
+
+                // レビュー数フィルター（上限、リストで取得できた場合のみ）
+                if (maxReviews !== null && rev > 0 && rev > maxReviews) {
                     preFilteredOut.reviews++;
                     continue;
                 }
@@ -263,10 +282,16 @@ class GoogleMapScraper {
                 original: candidates.length
             });
             if (preFilteredOut.rating > 0) {
-                console.log(`  - 評価で除外: ${preFilteredOut.rating}件 (${minRating}未満)`);
+                const ratingConditions = [];
+                if (minRating > 0) ratingConditions.push(`${minRating}未満`);
+                if (maxRating !== null) ratingConditions.push(`${maxRating}超`);
+                console.log(`  - 評価で除外: ${preFilteredOut.rating}件 (${ratingConditions.join('または')})`);
             }
             if (preFilteredOut.reviews > 0) {
-                console.log(`  - レビュー数で除外: ${preFilteredOut.reviews}件 (${minReviews}件未満)`);
+                const reviewConditions = [];
+                if (minReviews > 0) reviewConditions.push(`${minReviews}件未満`);
+                if (maxReviews !== null) reviewConditions.push(`${maxReviews}件超`);
+                console.log(`  - レビュー数で除外: ${preFilteredOut.reviews}件 (${reviewConditions.join('または')})`);
             }
             if (preFilteredOut.category > 0) {
                 console.log(`  - カテゴリで除外: ${preFilteredOut.category}件 (${filters.category}を含まない)`);
@@ -287,63 +312,118 @@ class GoogleMapScraper {
             }
             console.log('--- 事前フィルタリング完了 ---\n');
 
-            // 6. 各店舗の詳細情報を取得（フィルター適用しながら）
+            // 6. 各店舗の詳細情報を並列取得（フィルター適用しながら）
             const finalResults = [];
             let successCount = 0;
             let failCount = 0;
             let filteredOutCount = 0;
+            let processedCount = 0;
 
-            for (let i = 0; i < targets.length; i++) {
-                const target = targets[i];
-                console.log(`\n[${i + 1}/${targets.length}] ${target.name}の詳細を取得中...`);
+            // 並列処理の設定
+            const maxItemsPerTab = 3;  // 1タブあたり最大3件
+            const numTabs = Math.min(Math.ceil(targets.length / maxItemsPerTab), 5);  // 最大5タブ
+            console.log(`\n並列処理: ${numTabs}タブで${targets.length}件を処理します`);
 
-                // 進捗報告（詳細取得）
-                const percent = Math.round(((i + 1) / targets.length) * 100);
+            // 追加のページを作成
+            const pages = [this.page];
+            for (let i = 1; i < numTabs; i++) {
+                const newPage = await this.context.newPage();
+                newPage.setDefaultTimeout(this.elementTimeout);
+                newPage.setDefaultNavigationTimeout(this.navigationTimeout);
+                pages.push(newPage);
+            }
+
+            // ターゲットをタブごとに分割
+            const chunks = [];
+            for (let i = 0; i < targets.length; i += maxItemsPerTab) {
+                chunks.push(targets.slice(i, i + maxItemsPerTab));
+            }
+
+            // チャンクをタブに割り当てて並列処理
+            const processChunk = async (chunk, pageIndex, chunkIndex) => {
+                const page = pages[pageIndex % pages.length];
+                const results = [];
+
+                for (const target of chunk) {
+                    try {
+                        const details = await this.getDetailsWithPage(page, target.url);
+                        const mergedResult = {
+                            ...target,
+                            ...details,
+                            rating: details.detailRating > 0 ? details.detailRating : target.rating,
+                            reviews: details.detailReviews > 0 ? details.detailReviews : target.reviews,
+                            category: (target.category && target.category !== 'Unknown') ? target.category : (details.category || 'Unknown'),
+                            budget: target.budget || details.budget || '',
+                            review: target.review || ''
+                        };
+                        delete mergedResult.detailRating;
+                        delete mergedResult.detailReviews;
+                        delete mergedResult.listText;
+
+                        const filterResult = this.checkFilters(mergedResult, minReviews, filters);
+                        results.push({
+                            result: mergedResult,
+                            passed: filterResult.passed,
+                            reason: filterResult.reason,
+                            name: target.name
+                        });
+                    } catch (error) {
+                        results.push({
+                            result: null,
+                            passed: false,
+                            error: error.message,
+                            name: target.name
+                        });
+                    }
+                }
+                return results;
+            };
+
+            // 並列でチャンクを処理（タブ数分ずつ）
+            for (let i = 0; i < chunks.length; i += numTabs) {
+                const batch = chunks.slice(i, i + numTabs);
+                const promises = batch.map((chunk, idx) => processChunk(chunk, idx, i + idx));
+
+                const batchResults = await Promise.all(promises);
+
+                // 結果を集計
+                for (const chunkResults of batchResults) {
+                    for (const item of chunkResults) {
+                        processedCount++;
+                        if (item.error) {
+                            failCount++;
+                            console.log(`✗ ${item.name}: 取得失敗`);
+                        } else if (item.passed) {
+                            finalResults.push(item.result);
+                            successCount++;
+                            console.log(`✓ ${item.name}: 条件適合`);
+                        } else {
+                            filteredOutCount++;
+                            console.log(`✗ ${item.name}: ${item.reason}`);
+                        }
+                    }
+                }
+
+                // 進捗報告
+                const percent = Math.round((processedCount / targets.length) * 100);
                 this.reportProgress('details', {
                     message: `詳細情報を取得中...`,
-                    current: i + 1,
+                    current: processedCount,
                     total: targets.length,
                     percent: percent,
-                    name: target.name,
                     matched: successCount,
                     filtered: filteredOutCount
                 });
 
-                try {
-                    const details = await this.getDetails(target.url);
-                    // 詳細ページから取得した情報をマージ（リストで取得済みの値を優先する場合あり）
-                    const mergedResult = {
-                        ...target,
-                        ...details,
-                        // 評価・レビュー数は詳細ページの値を優先
-                        rating: details.detailRating > 0 ? details.detailRating : target.rating,
-                        reviews: details.detailReviews > 0 ? details.detailReviews : target.reviews,
-                        // カテゴリ・予算・口コミはリストで取得した値が有効ならそれを優先
-                        category: (target.category && target.category !== 'Unknown') ? target.category : (details.category || 'Unknown'),
-                        budget: target.budget || details.budget || '',
-                        review: target.review || ''
-                    };
-                    delete mergedResult.detailRating;
-                    delete mergedResult.detailReviews;
-                    delete mergedResult.listText;  // CSV出力に不要
-
-                    // 即座にフィルターチェック
-                    const filterResult = this.checkFilters(mergedResult, minReviews, filters);
-                    if (filterResult.passed) {
-                        finalResults.push(mergedResult);
-                        successCount++;
-                        console.log(`✓ 条件適合 (適合: ${successCount}, 除外: ${filteredOutCount}, 失敗: ${failCount})`);
-                    } else {
-                        filteredOutCount++;
-                        console.log(`✗ フィルター除外: ${filterResult.reason} (適合: ${successCount}, 除外: ${filteredOutCount})`);
-                    }
-                } catch (error) {
-                    console.error(`✗ ${target.name}の詳細取得に失敗: ${error.message}`);
-                    failCount++;
+                // バッチ間の待機（レート制限回避）
+                if (i + numTabs < chunks.length) {
+                    await this.page.waitForTimeout(300);
                 }
+            }
 
-                // レート制限回避のための待機
-                await this.page.waitForTimeout(500);
+            // 追加で作成したページを閉じる
+            for (let i = 1; i < pages.length; i++) {
+                await pages[i].close().catch(() => {});
             }
 
             console.log(`\n処理完了: 適合${finalResults.length}件, 除外${filteredOutCount}件, 失敗${failCount}件`);
@@ -560,53 +640,158 @@ class GoogleMapScraper {
         return { passed: true, reason: '' };
     }
 
-    async autoScroll(feedLocator) {
-        console.log('リストをスクロール中...');
-        const maxScrollAttempts = 5;
+    async waitForNetworkIdle(idleTime = 2000, timeout = 15000) {
+        return new Promise((resolve) => {
+            let lastRequestTime = Date.now();
+            let pendingRequests = 0;
+            let checkInterval;
+            let timeoutTimer;
+
+            const onRequest = () => {
+                pendingRequests++;
+                lastRequestTime = Date.now();
+            };
+
+            const onResponse = () => {
+                pendingRequests = Math.max(0, pendingRequests - 1);
+                lastRequestTime = Date.now();
+            };
+
+            const cleanup = () => {
+                this.page.off('request', onRequest);
+                this.page.off('response', onResponse);
+                this.page.off('requestfailed', onResponse);
+                clearInterval(checkInterval);
+                clearTimeout(timeoutTimer);
+            };
+
+            this.page.on('request', onRequest);
+            this.page.on('response', onResponse);
+            this.page.on('requestfailed', onResponse);
+
+            checkInterval = setInterval(() => {
+                const idleDuration = Date.now() - lastRequestTime;
+                if (pendingRequests === 0 && idleDuration >= idleTime) {
+                    console.log(`ネットワークアイドル検出（${idleDuration}ms）`);
+                    cleanup();
+                    resolve();
+                }
+            }, 200);
+
+            timeoutTimer = setTimeout(() => {
+                console.log('ネットワーク待機タイムアウト');
+                cleanup();
+                resolve();
+            }, timeout);
+        });
+    }
+
+    async autoScroll(feedLocator, maxItems = 0) {
+        const targetText = maxItems > 0 ? `最大${maxItems}件` : '最後まで';
+        console.log(`リストをスクロール中（${targetText}）...`);
+        const maxScrollAttempts = 100;  // 十分大きな上限
         let scrollAttempt = 0;
+        let previousItemCount = 0;
+        let noChangeCount = 0;
 
         try {
+            // 初期アイテム数を取得
+            previousItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+            console.log(`初期アイテム数: ${previousItemCount}件`);
+
             for (let i = 0; i < maxScrollAttempts; i++) {
                 scrollAttempt = i + 1;
-                console.log(`スクロール ${scrollAttempt}/${maxScrollAttempts}...`);
+
+                // 現在のアイテム数をチェック
+                const currentItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+
+                // maxItemsが設定されている場合、目標に達したか確認
+                if (maxItems > 0 && currentItemCount >= maxItems) {
+                    console.log(`目標件数（${maxItems}件）に到達しました（現在: ${currentItemCount}件）`);
+                    break;
+                }
+
+                console.log(`スクロール ${scrollAttempt}回目... (現在: ${currentItemCount}件${maxItems > 0 ? ` / 目標: ${maxItems}件` : ''})`);
 
                 try {
-                    await feedLocator.evaluate(el => el.scrollBy(0, 5000));
-                    await this.page.waitForTimeout(2000);
+                    // スクロール実行
+                    await feedLocator.evaluate(el => el.scrollBy(0, 3000));
 
-                    // 「すべて表示しました」テキストをチェック
-                    try {
-                        const endText = await this.page.getByText('すべて表示しました').isVisible({ timeout: 1000 });
-                        if (endText) {
-                            console.log('リストの最後に到達しました');
-                            break;
+                    // ネットワークがアイドルになるまで待機（2秒間リクエストがなければアイドル）
+                    await this.waitForNetworkIdle(2000, 15000);
+
+                    // ネットワークアイドル後、次のスクロールまで待機（5秒）
+                    await this.page.waitForTimeout(5000);
+
+                    // リスト終端のテキストをチェック
+                    const endPatterns = ['リストの最後に到達しました', 'すべて表示しました'];
+                    let foundEnd = false;
+                    for (const pattern of endPatterns) {
+                        try {
+                            const endText = await this.page.getByText(pattern).isVisible({ timeout: 500 });
+                            if (endText) {
+                                console.log(`リストの最後に到達しました（"${pattern}"を検出）`);
+                                foundEnd = true;
+                                break;
+                            }
+                        } catch (e) {
+                            // このパターンは見つからない
                         }
-                    } catch (e) {
-                        // テキストが見つからない場合は続行
                     }
+                    if (foundEnd) break;
+
+                    // 新しいアイテムが読み込まれたかチェック
+                    const newItemCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+
+                    if (newItemCount === previousItemCount) {
+                        // アイテムが増えていない場合、追加で待機してから再チェック
+                        console.log(`アイテム数変化なし（${newItemCount}件）、追加待機中...`);
+                        await this.page.waitForTimeout(3000);
+
+                        const afterWaitCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+                        if (afterWaitCount === previousItemCount) {
+                            noChangeCount++;
+                            if (noChangeCount >= 2) {
+                                console.log('これ以上読み込めるコンテンツがありません');
+                                break;
+                            }
+                        } else {
+                            noChangeCount = 0;
+                            previousItemCount = afterWaitCount;
+                        }
+                    } else {
+                        noChangeCount = 0;
+                        previousItemCount = newItemCount;
+                    }
+
                 } catch (error) {
                     console.warn(`スクロール ${scrollAttempt} でエラーが発生: ${error.message}`);
                     // スクロールエラーは致命的ではないので続行
                 }
             }
-            console.log(`スクロール完了 (${scrollAttempt}回実行)`);
+
+            const finalCount = await feedLocator.locator('a[href*="/maps/place/"]').count();
+            console.log(`スクロール完了 (${scrollAttempt}回実行、${finalCount}件取得)`);
         } catch (error) {
             console.error('スクロール中にエラーが発生しました:', error.message);
             // スクロールに失敗しても、取得できた分だけ処理を続行
         }
     }
 
-    async extractBasicList(feedLocator) {
-        console.log('リストから基本情報を抽出中...');
+    async extractBasicList(feedLocator, maxItems = 0) {
+        const limitText = maxItems > 0 ? `（最大${maxItems}件）` : '';
+        console.log(`リストから基本情報を抽出中${limitText}...`);
         const results = [];
         let errorCount = 0;
 
         try {
             // リンクの親要素を取得する
             const linkElements = await feedLocator.locator('a[href*="/maps/place/"]').all();
-            console.log(`${linkElements.length}個のリンクを検出しました`);
+            const totalLinks = linkElements.length;
+            const processLimit = maxItems > 0 ? Math.min(maxItems, totalLinks) : totalLinks;
+            console.log(`${totalLinks}個のリンクを検出しました（${processLimit}件まで処理）`);
 
-            for (let i = 0; i < linkElements.length; i++) {
+            for (let i = 0; i < processLimit; i++) {
                 try {
                     const linkEl = linkElements[i];
                     const url = await linkEl.getAttribute('href');
@@ -1120,6 +1305,123 @@ class GoogleMapScraper {
             }
         } catch (e) {
             // 営業時間取得に失敗しても続行
+        }
+
+        return {
+            address: address || '',
+            category: category || 'Unknown',
+            budget: budget || '',
+            businessHours: businessHours || '',
+            detailRating: rating,
+            detailReviews: reviews
+        };
+    }
+
+    /**
+     * 指定されたページで詳細情報を取得（並列処理用・高速版）
+     */
+    async getDetailsWithPage(page, url) {
+        // ページ遷移
+        try {
+            await page.goto(url, {
+                waitUntil: 'domcontentloaded',  // loadより高速
+                timeout: this.navigationTimeout
+            });
+        } catch (e) {
+            // リトライ1回
+            await page.goto(url, {
+                waitUntil: 'domcontentloaded',
+                timeout: this.navigationTimeout
+            });
+        }
+
+        // 待機時間を短縮（3000ms → 1500ms）
+        await page.waitForTimeout(1500);
+
+        let rating = 0;
+        let reviews = 0;
+        let address = '';
+        let category = 'Unknown';
+        let budget = '';
+        let businessHours = '';
+
+        try {
+            // 一括でページテキストを取得（複数回のevaluate呼び出しを削減）
+            const pageData = await page.evaluate(() => {
+                const text = document.body.innerText;
+                const lines = text.split('\n');
+
+                // 住所ボタン
+                const addrBtn = document.querySelector('button[data-item-id="address"]');
+                const addressLabel = addrBtn ? addrBtn.getAttribute('aria-label') : '';
+
+                // 評価
+                const ratingEl = document.querySelector('[role="img"][aria-label*="つ星"]');
+                const ratingLabel = ratingEl ? ratingEl.getAttribute('aria-label') : '';
+
+                // カテゴリボタン
+                const catBtn = document.querySelector('button[jsaction*="category"]');
+                const categoryText = catBtn ? catBtn.innerText : '';
+
+                return { text, lines, addressLabel, ratingLabel, categoryText };
+            });
+
+            // 住所
+            if (pageData.addressLabel) {
+                address = pageData.addressLabel.replace('住所: ', '').trim();
+            }
+
+            // 評価
+            const ratingMatch = pageData.ratingLabel?.match(/([0-9]\.[0-9])/);
+            if (ratingMatch) {
+                rating = parseFloat(ratingMatch[1]);
+            }
+
+            // カテゴリ
+            if (pageData.categoryText) {
+                category = pageData.categoryText.trim();
+            }
+
+            // レビュー数
+            for (const line of pageData.lines) {
+                if (line.includes('件のクチコミ') && !line.includes('ローカルガイド')) {
+                    const match = line.match(/([0-9,]+)\s*件のクチコミ/);
+                    if (match) {
+                        reviews = parseInt(match[1].replace(/,/g, ''));
+                        break;
+                    }
+                }
+            }
+
+            // 予算
+            for (const line of pageData.lines) {
+                if (line.includes('￥') || line.includes('¥')) {
+                    if (line.includes('1 人あたり')) {
+                        const match = line.match(/￥[0-9,]+～[0-9,]+|¥[0-9,]+～[0-9,]+/);
+                        if (match) {
+                            budget = match[0];
+                            break;
+                        }
+                    }
+                    if (!budget) {
+                        const match = line.match(/￥[0-9,]+～[0-9,]+|¥[0-9,]+～[0-9,]+/);
+                        if (match) {
+                            budget = match[0];
+                        }
+                    }
+                }
+            }
+
+            // 営業時間（簡易版）
+            for (const line of pageData.lines) {
+                if (line.includes('営業') && (line.includes(':00') || line.includes('時'))) {
+                    businessHours = line.substring(0, 100);
+                    break;
+                }
+            }
+
+        } catch (e) {
+            // エラーでも部分的なデータを返す
         }
 
         return {
